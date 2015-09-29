@@ -1,5 +1,6 @@
 import argparse
-from sniffer import Sniffer
+from sniffer.packet import PacketFilter
+from sniffer.sniffer import Sniffer
 from log import Log
 import logging
 import os
@@ -37,7 +38,8 @@ def main():
     logging.basicConfig(filename=os.path.join(args.out, 'sniffer.log'), level=log_level)
 
     source = args.interface if args.interface else args.file
-    sniffer = Sniffer(source, args.port)
+    packets = PacketFilter(source, args.port)
+    sniffer = Sniffer(packets)
 
     for session in sniffer.sniff():
         ptime, client, req_size, resp_size, command = session

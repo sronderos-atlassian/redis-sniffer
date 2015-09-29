@@ -5,69 +5,45 @@
 
 import logging
 import re
-import socket
 
-import dpkt
 import hiredis
-import pcap
 
 from redis_sniffer.log import Log
-
-RE_ARGS = re.compile('\*\d+')
-RE_LENS = re.compile('\$\d+')
+from redis_sniffer.sniffer.packet import RedisPacket, PacketFilter
 
 class Sniffer:
-    def __init__(self, source, port=6379, src_ip=None, dst_ip=None):
-        self.port = port
-        self.packet_iterator = packet_iterator(source, port, src_ip, dst_ip)
+    def __init__(self, source):
+        self.packet_iterator = source
+        """:type : PacketFilter """
 
     @staticmethod
     def version():
         return 'v1.1.0'
 
-    def get_client(self, ip_pkt, tcp_pkt):
-        src = socket.inet_ntoa(ip_pkt.src)
-        sport = tcp_pkt.sport
-        dst = socket.inet_ntoa(ip_pkt.dst)
-        dport = tcp_pkt.dport
-        src_addr = '%s:%s' % (src, sport)
-        dst_addr = '%s:%s' % (dst, dport)
-        if sport == self.port:
-            logging.debug("Data is a redis response")
-            is_request = False
-            client = dst_addr
-        else:
-            logging.debug("Data is a redis request")
-            is_request = True
-            client = src_addr
-        return client, is_request
-
     def sniff(self):
         sessions = {}
 
         logging.debug("<=============== Checking for Ethernet Packets ==============>")
-        for ptime, pdata in self.packet_iterator:
-            ether_pkt = dpkt.ethernet.Ethernet(pdata)
-            ip_pkt = ether_pkt.data
-            tcp_pkt = ip_pkt.data
-            tcp_data = tcp_pkt.data
+        for redis_packet in self.packet_iterator:
+            tcp_data = redis_packet.data
 
             logging.debug("Checking the length of the tcp packet")
 
             if len(tcp_data) == 0:
                 logging.debug("TCP Packet is empty")
-                logging.debug("extra bytes: %s", len(pdata))
+                logging.debug("extra bytes: %s", size)
                 continue
 
             logging.debug("TCP Packet has data")
             logging.debug("Checking to see if the data is a request or response")
-            client, is_request = self.get_client(ip_pkt, tcp_pkt)
+            client = redis_packet.client
+            size = redis_packet.size
 
-            if is_request:
+            if redis_packet.is_request:
                 # TODO: why is this check here?
                 if not tcp_data:
                     logging.debug("TCP Data is empty")
-                    logging.debug("extra bytes: %s", len(pdata))
+                    logging.debug("extra bytes: %s", size)
                     continue
 
                 session = sessions.get(client, None)
@@ -77,32 +53,25 @@ class Sniffer:
                     sessions[client] = session
 
                 if session.is_receiving() and session.commands:
-                    yield ptime, client, session.request_size, session.response_size, ' / '.join(session.commands)
+                    yield redis_packet.ptime, client, session.request_size, session.response_size, ' / '.join(session.commands)
                     session.clear()
 
-                session.process_request_packet(len(pdata), tcp_data)
+                session.process_request_packet(size, tcp_data)
 
             else:
                 session = sessions.get(client)
                 if not session:
                     logging.debug("No session for %s. Drop unknown response",client)
-                    logging.debug("extra bytes: %s", len(pdata))
+                    logging.debug("extra bytes: %s", size)
                     continue
 
-                session.process_response_packet(len(pdata), tcp_data)
+                session.process_response_packet(size, tcp_data)
 
+                if session.is_receiving() and len(session.commands) == session.responses:
+                    yield redis_packet.ptime, client, session.request_size, session.response_size, ' / '.join(
+                        session.commands)
+                    session.clear()
 
-def packet_iterator(interface, redis_port=6379, src_ip=None, dst_ip=None):
-    filter = 'tcp port %s' % redis_port
-    if src_ip:
-        filter += ' and src %s' % src_ip
-    if dst_ip:
-        filter += ' and dst %s' % dst_ip
-
-    pc = pcap.pcap(interface)
-    pc.setfilter(filter)
-
-    return pc
 
 
 class RedisSession():
@@ -153,4 +122,3 @@ class RedisSession():
         self.responses = 0
         self.request_size = 0
         self.response_size = 0
-
